@@ -89,12 +89,10 @@ jobs:
           fi
 
           echo "========== 修复 7: 通用 Kconfig 无效引用扫描 =========="
-          # 扫描所有 Kconfig 文件中的 source 引用，移除指向不存在文件的行
           find . -name "Kconfig" -type f | while read -r kconfig_file; do
             while IFS= read -r line; do
               file=$(echo "$line" | grep -oP '(?<=source ").*(?=")')
               if [ -n "$file" ]; then
-                # 解析相对路径
                 dir=$(dirname "$kconfig_file")
                 resolved="$dir/$file"
                 if [ ! -f "$resolved" ] && [ ! -d "$resolved" ]; then
@@ -107,3 +105,59 @@ jobs:
           echo "✅ 已修复"
 
           echo "========== 所有修复完成 =========="
+
+      - name: 设置环境变量
+        run: |
+          echo "ARCH=arm64" >> $GITHUB_ENV
+          echo "SUBARCH=arm64" >> $GITHUB_ENV
+          echo "CROSS_COMPILE=aarch64-linux-gnu-" >> $GITHUB_ENV
+          echo "CC=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+
+      - name: 开始编译内核
+        run: |
+          cd kernel
+          make clean && make mrproper
+          make O=out ARCH=arm64 vendor/kona-perf_defconfig
+          make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j$(nproc)
+
+      - name: 打包刷入包 (AnyKernel3)
+        run: |
+          echo "========== 查找内核产物 =========="
+          BOOT_DIR="kernel/out/arch/arm64/boot"
+
+          echo "📂 boot 目录内容："
+          ls -la "$BOOT_DIR"
+
+          if [ -f "$BOOT_DIR/Image.gz-dtb" ]; then
+            echo "✅ 找到 Image.gz-dtb"
+            cp "$BOOT_DIR/Image.gz-dtb" AnyKernel3/
+          elif [ -f "$BOOT_DIR/Image.gz" ]; then
+            echo "✅ 找到 Image.gz（无合并 dtb）"
+            cp "$BOOT_DIR/Image.gz" AnyKernel3/
+            if ls "$BOOT_DIR/dts/qcom/"*.dtb 1>/dev/null 2>&1; then
+              echo "✅ 找到独立 dtb 文件"
+              mkdir -p AnyKernel3/dtb
+              cp "$BOOT_DIR/dts/qcom/"*.dtb AnyKernel3/dtb/
+            fi
+          elif [ -f "$BOOT_DIR/Image-dtb" ]; then
+            echo "✅ 找到 Image-dtb"
+            cp "$BOOT_DIR/Image-dtb" AnyKernel3/
+          elif [ -f "$BOOT_DIR/Image" ]; then
+            echo "✅ 找到 Image（未压缩）"
+            cp "$BOOT_DIR/Image" AnyKernel3/
+          else
+            echo "❌ 未找到任何内核镜像文件！"
+            echo "📂 尝试搜索整个 out 目录..."
+            find kernel/out -name "Image*" -o -name "*.dtb" 2>/dev/null
+            exit 1
+          fi
+
+          echo "========== AnyKernel3 目录内容 =========="
+          ls -la AnyKernel3/
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: OnePlus8T-Kernel-OOS14-SukiSU
+          path: AnyKernel3/
+          if-no-files-found: error
