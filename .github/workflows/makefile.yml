@@ -1,3 +1,4 @@
+
 name: Build OnePlus 8T Kernel (OOS 14 + SukiSU + BPF Backport)
 
 on:
@@ -7,10 +8,6 @@ on:
         description: 'SukiSU 分支 (默认 main)'
         required: false
         default: 'main'
-      bpf_patches_url:
-        description: 'BPF 补丁集合的 Git 仓库地址 (留空则跳过)'
-        required: false
-        default: ''
 
 jobs:
   build:
@@ -34,28 +31,20 @@ jobs:
           git clone --depth=1 -b oneplus/sm8250_u_14.0.0_op8t \
             https://github.com/OnePlusOSS/android_kernel_oneplus_sm8250.git kernel
 
-      - name: 应用 BPF 回移补丁
-        if: ${{ github.event.inputs.bpf_patches_url != '' }}
+      - name: 应用 BPF Backport 补丁
         run: |
           cd kernel
-          # 克隆包含 BPF backport 补丁的仓库
-          git clone --depth=1 ${{ github.event.inputs.bpf_patches_url }} bpf-patches
-          # 逐个应用补丁
-          for patch in bpf-patches/*.patch; do
+          git clone --depth=1 https://github.com/nicholaschum/bpf-backport-4.19.git bpf-backport
+          for patch in bpf-backport/patches/*.patch; do
             echo "Applying: $patch"
-            git am "$patch" || {
-              echo "⚠️ 补丁冲突: $patch，尝试三向合并..."
-              git am --abort
-              git apply --3way "$patch" || echo "❌ 跳过: $patch"
-            }
+            git apply --check "$patch" 2>/dev/null && git apply "$patch" || echo "⚠️ 跳过: $patch"
           done
 
       - name: 集成 SukiSU
         run: |
           cd kernel
-          git clone --depth=1 -b ${{ github.event.inputs.suki_branch }} \
-            https://github.com/SukiSU-Ultra/SukiSU-Ultra.git suki
-          bash suki/install.sh
+          # 使用官方提供的 setup.sh 脚本集成 SukiSU（内置模式）
+          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s builtin
 
       - name: 设置环境变量
         run: |
