@@ -1,5 +1,4 @@
-
-name: Build OnePlus 8T Kernel (OOS 14 + SukiSU + BPF Backport)
+name: Build OnePlus 8T Kernel (OOS 14 + SukiSU)
 
 on:
   workflow_dispatch:
@@ -31,19 +30,9 @@ jobs:
           git clone --depth=1 -b oneplus/sm8250_u_14.0.0_op8t \
             https://github.com/OnePlusOSS/android_kernel_oneplus_sm8250.git kernel
 
-      - name: 应用 BPF Backport 补丁
+      - name: 集成 SukiSU（含 BPF 支持）
         run: |
           cd kernel
-          git clone --depth=1 https://github.com/nicholaschum/bpf-backport-4.19.git bpf-backport
-          for patch in bpf-backport/patches/*.patch; do
-            echo "Applying: $patch"
-            git apply --check "$patch" 2>/dev/null && git apply "$patch" || echo "⚠️ 跳过: $patch"
-          done
-
-      - name: 集成 SukiSU
-        run: |
-          cd kernel
-          # 使用官方提供的 setup.sh 脚本集成 SukiSU（内置模式）
           curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s builtin
 
       - name: 设置环境变量
@@ -67,5 +56,5 @@ jobs:
       - name: 上传产物
         uses: actions/upload-artifact@v4
         with:
-          name: OnePlus8T-Kernel-OOS14-SukiSU-BPF
+          name: OnePlus8T-Kernel-OOS14-SukiSU
           path: AnyKernel3/*
