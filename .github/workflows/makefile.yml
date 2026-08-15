@@ -46,10 +46,16 @@ jobs:
             echo "✅ 已修复"
           fi
 
-          echo "========== 修复 2: KPM __bad_copy_from 编译错误 =========="
+          echo "========== 修复 2: block/blk/Kconfig 缺失 =========="
+          if [ ! -f "block/blk/Kconfig" ]; then
+            echo "⚠️ block/blk/Kconfig 不存在，移除 block/Kconfig 中的引用..."
+            sed -i '/block\/blk\/Kconfig/d' block/Kconfig
+            echo "✅ 已修复"
+          fi
+
+          echo "========== 修复 3: KPM __bad_copy_from 编译错误 =========="
           if [ -f "drivers/kernelsu/kpm/kpm.c" ]; then
             echo "⚠️ 检测到 kpm.c，修复 __bad_copy_from 错误..."
-            # 注释掉 sukisu_kpm_list 函数中导致 copy source size too small 的代码块
             sed -i '/sukisu_kpm_list/,/^}/ {
               /copy_to_user/s/^/\/\//
               /__bad_copy_from/s/^/\/\//
@@ -57,68 +63,47 @@ jobs:
             echo "✅ 已修复"
           fi
 
-          echo "========== 修复 3: CPU 调度器 unused variable 警告 =========="
+          echo "========== 修复 4: CPU 调度器 unused variable 警告 =========="
           if [ -f "kernel/sched/ext.c" ]; then
             echo "⚠️ 检测到 ext.c，修复 free_dsq_irq_work 未使用变量..."
             sed -i 's/static DEFINE_IRQ_WORK(free_dsq_irq_work/static __maybe_unused DEFINE_IRQ_WORK(free_dsq_irq_work/' kernel/sched/ext.c
             echo "✅ 已修复"
           fi
 
-          echo "========== 修复 4: Python 2/3 兼容性问题 =========="
-          # 将内核脚本中的 python 调用强制指向 python3
+          echo "========== 修复 5: Python 2/3 兼容性问题 =========="
           find scripts/ -name "*.py" -exec sed -i '1s|^#!/usr/bin/env python$|#!/usr/bin/env python3|' {} \;
           find scripts/ -name "*.sh" -exec sed -i 's/\bpython\b/python3/g' {} \;
           echo "✅ 已修复"
 
-          echo "========== 修复 5: defconfig 补充必要配置 =========="
+          echo "========== 修复 6: defconfig 补充必要配置 =========="
           DEFCONFIG="arch/arm64/configs/vendor/kona-perf_defconfig"
           if [ -f "$DEFCONFIG" ]; then
             echo "⚠️ 补充 Kprobes 和其他必要配置..."
-            # 确保 Kprobes 开启（SukiSU 依赖）
             sed -i 's/# CONFIG_KPROBES is not set/CONFIG_KPROBES=y/' "$DEFCONFIG"
             sed -i 's/# CONFIG_HAVE_KPROBES is not set/CONFIG_HAVE_KPROBES=y/' "$DEFCONFIG"
             sed -i 's/# CONFIG_KPROBE_EVENTS is not set/CONFIG_KPROBE_EVENTS=y/' "$DEFCONFIG"
-            # 确保 BPF 相关配置开启
             grep -q "CONFIG_BPF_SYSCALL=y" "$DEFCONFIG" || echo "CONFIG_BPF_SYSCALL=y" >> "$DEFCONFIG"
             grep -q "CONFIG_BPF_JIT=y" "$DEFCONFIG" || echo "CONFIG_BPF_JIT=y" >> "$DEFCONFIG"
-            # 关闭 LOCALVERSION_AUTO 避免编译警告
             sed -i 's/CONFIG_LOCALVERSION_AUTO=y/CONFIG_LOCALVERSION_AUTO=n/' "$DEFCONFIG"
             echo "✅ 已修复"
           fi
 
-          echo "========== 修复 6: 其他缺失 Kconfig 引用 =========="
-          # 扫描 init/Kconfig 中所有 source 引用，移除指向不存在文件的行
-          while IFS= read -r line; do
-            file=$(echo "$line" | grep -oP '(?<=source ").*(?=")')
-            if [ -n "$file" ] && [ ! -f "$file" ] && [ ! -d "$(dirname $file)" ]; then
-              echo "⚠️ 移除无效引用: $file"
-              sed -i "\|$file|d" init/Kconfig
-            fi
-          done < <(grep 'source "' init/Kconfig)
+          echo "========== 修复 7: 通用 Kconfig 无效引用扫描 =========="
+          # 扫描所有 Kconfig 文件中的 source 引用，移除指向不存在文件的行
+          find . -name "Kconfig" -type f | while read -r kconfig_file; do
+            while IFS= read -r line; do
+              file=$(echo "$line" | grep -oP '(?<=source ").*(?=")')
+              if [ -n "$file" ]; then
+                # 解析相对路径
+                dir=$(dirname "$kconfig_file")
+                resolved="$dir/$file"
+                if [ ! -f "$resolved" ] && [ ! -d "$resolved" ]; then
+                  echo "⚠️ 移除无效引用: $file (在 $kconfig_file 中)"
+                  sed -i "\|$file|d" "$kconfig_file"
+                fi
+              fi
+            done < <(grep 'source "' "$kconfig_file" 2>/dev/null)
+          done
           echo "✅ 已修复"
 
           echo "========== 所有修复完成 =========="
-
-      - name: 设置环境变量
-        run: |
-          echo "ARCH=arm64" >> $GITHUB_ENV
-          echo "SUBARCH=arm64" >> $GITHUB_ENV
-          echo "CROSS_COMPILE=aarch64-linux-gnu-" >> $GITHUB_ENV
-          echo "CC=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
-
-      - name: 开始编译内核
-        run: |
-          cd kernel
-          make clean && make mrproper
-          make O=out ARCH=arm64 vendor/kona-perf_defconfig
-          make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j$(nproc)
-
-      - name: 打包刷入包 (AnyKernel3)
-        run: |
-          cp kernel/out/arch/arm64/boot/Image.gz-dtb AnyKernel3/
-
-      - name: 上传产物
-        uses: actions/upload-artifact@v4
-        with:
-          name: OnePlus8T-Kernel-OOS14-SukiSU
-          path: AnyKernel3/*
