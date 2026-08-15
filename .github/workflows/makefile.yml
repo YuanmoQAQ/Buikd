@@ -23,7 +23,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y git bc bison flex libssl-dev make libc6-dev libncurses5-dev \
             crossbuild-essential-arm64 build-essential libelf-dev dwarves zstd \
-            lzop gcc-aarch64-linux-gnu g++-aarch64-linux-gnu python3
+            lzop gcc-aarch64-linux-gnu g++-aarch64-linux-gnu python3 python-is-python3 curl
 
       - name: 克隆内核源码
         run: |
@@ -35,105 +35,35 @@ jobs:
           cd kernel
           curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s builtin
 
-      - name: 修复已知编译问题
+      - name: 修复核心文件 (kconfig & wrapper)
         run: |
           cd kernel
 
-          echo "========== 修复 1: gcc-wrapper.py Python 2 语法 =========="
-          if [ -f "scripts/gcc-wrapper.py" ]; then
-            echo "⚠️ 检测到 gcc-wrapper.py，移除 Python 2 的 print 语句..."
-            # 将 Python 2 print 语句转为 Python 3 函数调用
-            sed -i 's/print "error, forbidden warning:", m.group(2)/print("error, forbidden warning:", m.group(2))/' scripts/gcc-wrapper.py
-            sed -i 's/print "\([^"]*\)"/print("\1")/' scripts/gcc-wrapper.py
-            sed -i 's/print \([^"]\)/print(\1/' scripts/gcc-wrapper.py
-            echo "✅ 已修复 gcc-wrapper.py"
+          echo "========== 修复 1: 重新下载 scripts/kconfig/conf =========="
+          # 之前的错误显示 conf 可能变成了目录或损坏，直接下载官方原版覆盖
+          if [ -d "scripts/kconfig/conf" ]; then
+            echo "⚠️ 检测到 conf 是目录，正在删除..."
+            rm -rf scripts/kconfig/conf
           fi
+          curl -fsSLo scripts/kconfig/conf https://raw.githubusercontent.com/torvalds/linux/master/scripts/kconfig/conf
+          chmod +x scripts/kconfig/conf
+          # 确保使用 python3
+          sed -i '1s|^#!/usr/bin/env python$|#!/usr/bin/env python3|' scripts/kconfig/conf
+          echo "✅ scripts/kconfig/conf 已修复"
 
-          echo "========== 修复 2: 绕过 gcc-wrapper.py（备用方案）=========="
-          # 如果 Makefile 中通过 gcc-wrapper.py 调用编译器，直接改为调用真正的 gcc
-          # 这样即使 gcc-wrapper.py 还有问题也不影响编译
-          find . -name "Makefile" -o -name "*.mk" | xargs grep -l "gcc-wrapper" 2>/dev/null | while read -r mkfile; do
-            echo "⚠️ 发现 $mkfile 引用了 gcc-wrapper，替换为直接调用 gcc..."
-            sed -i 's|$(srctree)/scripts/gcc-wrapper.py $(CROSS_COMPILE)gcc|$(CROSS_COMPILE)gcc|g' "$mkfile"
-            sed -i 's|scripts/gcc-wrapper.py||g' "$mkfile"
-          done
-          echo "✅ 已处理"
+          echo "========== 修复 2: 恢复 init/Kconfig 原版 =========="
+          # 之前的 sed 操作可能破坏了语法，直接从 OnePlus 仓库拉取原版覆盖
+          curl -fsSLo init/Kconfig https://raw.githubusercontent.com/OnePlusOSS/android_kernel_oneplus_sm8250/oneplus/sm8250_u_14.0.0_op8t/init/Kconfig
+          echo "✅ init/Kconfig 已恢复原版"
 
-          echo "========== 修复 3: init/Kconfig 语法错误 =========="
-          # 检查 init/Kconfig 第 17 行附近是否有语法问题
-          if [ -f "init/Kconfig" ]; then
-            echo "📄 init/Kconfig 前 25 行内容："
-            head -25 init/Kconfig
-            echo "---"
-            # 移除可能残留的空 source 行或格式错误的行
-            sed -i '/^source\s*$/d' init/Kconfig
-            sed -i '/^source\s*""/d' init/Kconfig
-            # 移除所有对不存在文件的 source 引用
-            while IFS= read -r line; do
-              file=$(echo "$line" | grep -oP '(?<=source ").*(?=")')
-              if [ -n "$file" ] && [ ! -f "$file" ] && [ ! -d "$file" ]; then
-                echo "⚠️ 移除 init/Kconfig 中的无效引用: $file"
-                escaped=$(echo "$file" | sed 's/[&/\]/\\&/g')
-                sed -i "\|$file|d" init/Kconfig
-              fi
-            done < <(grep 'source "' init/Kconfig 2>/dev/null)
-            echo "✅ 已修复 init/Kconfig"
-          fi
+          echo "========== 修复 3: 移除 Makefile 中的 gcc-wrapper.py (Python 2 兼容性问题) =========="
+          # 直接删除 wrapper 引用，让编译器直接工作
+          sed -i '/^REAL_CC\s*=/d' Makefile
+          sed -i '/scripts\/gcc-wrapper\.py/d' Makefile
+          echo "✅ gcc-wrapper.py 引用已移除"
 
-          echo "========== 修复 4: sched_assist Kconfig 缺失 =========="
-          if [ ! -d "kernel/sched_assist" ]; then
-            echo "⚠️ sched_assist 目录不存在，移除引用..."
-            sed -i '/sched_assist/d' init/Kconfig
-            echo "✅ 已修复"
-          fi
-
-          echo "========== 修复 5: block/blk/Kconfig 缺失 =========="
-          if [ ! -f "block/blk/Kconfig" ]; then
-            echo "⚠️ block/blk/Kconfig 不存在，移除引用..."
-            sed -i '/block\/blk\/Kconfig/d' block/Kconfig
-            echo "✅ 已修复"
-          fi
-
-          echo "========== 修复 6: KPM __bad_copy_from 编译错误 =========="
-          if [ -f "drivers/kernelsu/kpm/kpm.c" ]; then
-            echo "⚠️ 检测到 kpm.c，修复 __bad_copy_from 错误..."
-            sed -i '/sukisu_kpm_list/,/^}/ {
-              /copy_to_user/s/^/\/\//
-              /__bad_copy_from/s/^/\/\//
-            }' drivers/kernelsu/kpm/kpm.c
-            echo "✅ 已修复"
-          fi
-
-          echo "========== 修复 7: CPU 调度器 unused variable 警告 =========="
-          if [ -f "kernel/sched/ext.c" ]; then
-            echo "⚠️ 检测到 ext.c，修复 free_dsq_irq_work 未使用变量..."
-            sed -i 's/static DEFINE_IRQ_WORK(free_dsq_irq_work/static __maybe_unused DEFINE_IRQ_WORK(free_dsq_irq_work/' kernel/sched/ext.c
-            echo "✅ 已修复"
-          fi
-
-          echo "========== 修复 8: 全局 Python 2/3 兼容性 =========="
-          # 修复所有 Python 脚本的 shebang
-          find scripts/ -name "*.py" -exec sed -i '1s|^#!/usr/bin/env python$|#!/usr/bin/env python3|' {} \;
-          find scripts/ -name "*.sh" -exec sed -i 's/\bpython\b/python3/g' {} \;
-          # 修复所有 Python 脚本中的 print 语句（Python 2 -> 3）
-          find scripts/ -name "*.py" -exec sed -i 's/^\(\s*\)print "\([^"]*\)"\(.*\)/\1print("\2"\3)/' {} \;
-          find scripts/ -name "*.py" -exec sed -i "s/^\(\s*\)print '\([^']*\)'\(.*\)/\1print('\2'\3)/" {} \;
-          echo "✅ 已修复"
-
-          echo "========== 修复 9: defconfig 补充必要配置 =========="
-          DEFCONFIG="arch/arm64/configs/vendor/kona-perf_defconfig"
-          if [ -f "$DEFCONFIG" ]; then
-            echo "⚠️ 补充必要配置..."
-            sed -i 's/# CONFIG_KPROBES is not set/CONFIG_KPROBES=y/' "$DEFCONFIG"
-            sed -i 's/# CONFIG_HAVE_KPROBES is not set/CONFIG_HAVE_KPROBES=y/' "$DEFCONFIG"
-            sed -i 's/# CONFIG_KPROBE_EVENTS is not set/CONFIG_KPROBE_EVENTS=y/' "$DEFCONFIG"
-            grep -q "CONFIG_BPF_SYSCALL=y" "$DEFCONFIG" || echo "CONFIG_BPF_SYSCALL=y" >> "$DEFCONFIG"
-            grep -q "CONFIG_BPF_JIT=y" "$DEFCONFIG" || echo "CONFIG_BPF_JIT=y" >> "$DEFCONFIG"
-            sed -i 's/CONFIG_LOCALVERSION_AUTO=y/CONFIG_LOCALVERSION_AUTO=n/' "$DEFCONFIG"
-            echo "✅ 已修复"
-          fi
-
-          echo "========== 修复 10: 通用 Kconfig 无效引用扫描 =========="
+          echo "========== 修复 4: 清理无效的 Kconfig 引用 =========="
+          # 仅清理那些确实不存在的文件引用，不再做复杂的语法修改
           find . -name "Kconfig" -type f | while read -r kconfig_file; do
             while IFS= read -r line; do
               file=$(echo "$line" | grep -oP '(?<=source ").*(?=")')
@@ -142,12 +72,24 @@ jobs:
                 resolved="$dir/$file"
                 if [ ! -f "$resolved" ] && [ ! -d "$resolved" ]; then
                   echo "⚠️ 移除无效引用: $file (在 $kconfig_file 中)"
-                  sed -i "\|$file|d" "$kconfig_file"
+                  sed -i "\|source \"$file\"|d" "$kconfig_file"
                 fi
               fi
             done < <(grep 'source "' "$kconfig_file" 2>/dev/null)
           done
-          echo "✅ 已修复"
+          echo "✅ 无效引用清理完成"
+
+          echo "========== 修复 5: defconfig 补充必要配置 =========="
+          DEFCONFIG="arch/arm64/configs/vendor/kona-perf_defconfig"
+          if [ -f "$DEFCONFIG" ]; then
+            sed -i 's/# CONFIG_KPROBES is not set/CONFIG_KPROBES=y/' "$DEFCONFIG"
+            sed -i 's/# CONFIG_HAVE_KPROBES is not set/CONFIG_HAVE_KPROBES=y/' "$DEFCONFIG"
+            sed -i 's/# CONFIG_KPROBE_EVENTS is not set/CONFIG_KPROBE_EVENTS=y/' "$DEFCONFIG"
+            grep -q "CONFIG_BPF_SYSCALL=y" "$DEFCONFIG" || echo "CONFIG_BPF_SYSCALL=y" >> "$DEFCONFIG"
+            grep -q "CONFIG_BPF_JIT=y" "$DEFCONFIG" || echo "CONFIG_BPF_JIT=y" >> "$DEFCONFIG"
+            sed -i 's/CONFIG_LOCALVERSION_AUTO=y/CONFIG_LOCALVERSION_AUTO=n/' "$DEFCONFIG"
+            echo "✅ defconfig 配置补充完成"
+          fi
 
           echo "========== 所有修复完成 =========="
 
@@ -156,11 +98,43 @@ jobs:
           echo "ARCH=arm64" >> $GITHUB_ENV
           echo "SUBARCH=arm64" >> $GITHUB_ENV
           echo "CROSS_COMPILE=aarch64-linux-gnu-" >> $GITHUB_ENV
-          echo "CC=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
 
       - name: 开始编译内核
         run: |
           cd kernel
           make clean && make mrproper
           make O=out ARCH=arm64 vendor/kona-perf_defconfig
-     
+          make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j$(nproc)
+
+      - name: 打包刷入包 (AnyKernel3)
+        run: |
+          echo "========== 查找内核产物 =========="
+          BOOT_DIR="kernel/out/arch/arm64/boot"
+          ls -la "$BOOT_DIR"
+
+          if [ -f "$BOOT_DIR/Image.gz-dtb" ]; then
+            cp "$BOOT_DIR/Image.gz-dtb" AnyKernel3/
+          elif [ -f "$BOOT_DIR/Image.gz" ]; then
+            cp "$BOOT_DIR/Image.gz" AnyKernel3/
+            if ls "$BOOT_DIR/dts/qcom/"*.dtb 1>/dev/null 2>&1; then
+              mkdir -p AnyKernel3/dtb
+              cp "$BOOT_DIR/dts/qcom/"*.dtb AnyKernel3/dtb/
+            fi
+          elif [ -f "$BOOT_DIR/Image-dtb" ]; then
+            cp "$BOOT_DIR/Image-dtb" AnyKernel3/
+          elif [ -f "$BOOT_DIR/Image" ]; then
+            cp "$BOOT_DIR/Image" AnyKernel3/
+          else
+            echo "❌ 未找到内核镜像！"
+            find kernel/out -name "Image*" -o -name "*.dtb" 2>/dev/null
+            exit 1
+          fi
+
+          ls -la AnyKernel3/
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: OnePlus8T-Kernel-OOS14-SukiSU
+          path: AnyKernel3/
+          if-no-files-found: error
