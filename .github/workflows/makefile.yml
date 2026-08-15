@@ -1,7 +1,16 @@
-name: Build OnePlus 8T Kernel (OOS 14)
+name: Build OnePlus 8T Kernel (OOS 14 + SukiSU + BPF Backport)
 
 on:
-  workflow_dispatch: # 允许手动点击按钮触发编译
+  workflow_dispatch:
+    inputs:
+      suki_branch:
+        description: 'SukiSU 分支 (默认 main)'
+        required: false
+        default: 'main'
+      bpf_patches_url:
+        description: 'BPF 补丁集合的 Git 仓库地址 (留空则跳过)'
+        required: false
+        default: ''
 
 jobs:
   build:
@@ -20,11 +29,33 @@ jobs:
             crossbuild-essential-arm64 build-essential libelf-dev dwarves zstd \
             lzop gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
 
-      - name: 克隆内核源码 (带权限验证)
+      - name: 克隆内核源码
         run: |
-          # 使用 GITHUB_TOKEN 进行身份验证以克隆私有仓库
           git clone --depth=1 -b oneplus/sm8250_u_14.0.0_op8t \
-            https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/YuanmoQAQ/android_kernel_oneplus_sm8250.git kernel
+            https://github.com/OnePlusOSS/android_kernel_oneplus_sm8250.git kernel
+
+      - name: 应用 BPF 回移补丁
+        if: ${{ github.event.inputs.bpf_patches_url != '' }}
+        run: |
+          cd kernel
+          # 克隆包含 BPF backport 补丁的仓库
+          git clone --depth=1 ${{ github.event.inputs.bpf_patches_url }} bpf-patches
+          # 逐个应用补丁
+          for patch in bpf-patches/*.patch; do
+            echo "Applying: $patch"
+            git am "$patch" || {
+              echo "⚠️ 补丁冲突: $patch，尝试三向合并..."
+              git am --abort
+              git apply --3way "$patch" || echo "❌ 跳过: $patch"
+            }
+          done
+
+      - name: 集成 SukiSU
+        run: |
+          cd kernel
+          git clone --depth=1 -b ${{ github.event.inputs.suki_branch }} \
+            https://github.com/SukiSU-Ultra/SukiSU-Ultra.git suki
+          bash suki/install.sh
 
       - name: 设置环境变量
         run: |
@@ -32,32 +63,20 @@ jobs:
           echo "SUBARCH=arm64" >> $GITHUB_ENV
           echo "CROSS_COMPILE=aarch64-linux-gnu-" >> $GITHUB_ENV
           echo "CC=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
-          echo "PATH=$PATH:/usr/bin" >> $GITHUB_ENV
 
       - name: 开始编译内核
         run: |
           cd kernel
-          
-          # 1. 清理环境
           make clean && make mrproper
-          
-          # 2. 加载配置文件 (一加8T通常使用 vendor/kona-perf_defconfig)
-          # 如果不确定，可以 ls arch/arm64/configs/ 查看具体文件名
           make O=out ARCH=arm64 vendor/kona-perf_defconfig
-          
-          # 3. 执行编译 (-j$(nproc) 表示使用所有核心加速)
           make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j$(nproc)
 
       - name: 打包刷入包 (AnyKernel3)
         run: |
-          # 将编译好的 Image 复制到 AnyKernel3 目录
           cp kernel/out/arch/arm64/boot/Image.gz-dtb AnyKernel3/
-          
-          # 如果你需要单独打包 dtbo.img，可以在这里处理，或者让 AnyKernel3 自动处理
-          # cp kernel/out/arch/arm64/boot/dts/qcom/sm8250-oneplus-kebab.dtb AnyKernel3/dtbo.img
 
       - name: 上传产物
         uses: actions/upload-artifact@v4
         with:
-          name: OnePlus8T-Kernel-OOS14
+          name: OnePlus8T-Kernel-OOS14-SukiSU-BPF
           path: AnyKernel3/*
