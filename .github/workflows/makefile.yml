@@ -1,0 +1,157 @@
+name: Build OnePlus 8T Kernel (OOS 14) + KernelSU + AK3
+
+on:
+  workflow_dispatch:
+
+env:
+  KERNEL_REPO: YuanmoQAQ/android_kernel_oneplus_sm8250
+  KERNEL_BRANCH: oneplus/sm8250_u_14.0.0_op8t
+  DEVICE_CODENAME: kebab
+  DEFCONFIG: vendor/kona-perf_defconfig
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+      # ========== 1. 克隆内核源码（你的 Fork） ==========
+      - name: 克隆内核源码
+        run: |
+          git clone --depth=1 -b ${{ env.KERNEL_BRANCH }} \
+            https://github.com/${{ env.KERNEL_REPO }}.git kernel
+
+      # ========== 2. 安装编译依赖 ==========
+      - name: 安装编译依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential flex bison gperf zip curl \
+            zlib1g-dev gcc-multilib g++-multilib \
+            lib32ncurses5-dev x11proto-core-dev \
+            libx11-dev lib32z-dev ccache libgl1-mesa-dev \
+            libxml2-utils xsltproc unzip python3 bc \
+            libssl-dev libelf-dev dwarves rsync cpio \
+            git gnupg
+
+      # ========== 3. 下载 Clang 工具链 ==========
+      - name: 下载 Clang 工具链
+        run: |
+          mkdir -p toolchain
+          cd toolchain
+          git clone --depth=1 \
+            https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 \
+            -b android14-release clang
+
+      # ========== 4. 集成 KernelSU ==========
+      - name: 集成 KernelSU
+        run: |
+          cd kernel
+          # 使用 KernelSU 官方集成脚本
+          curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s v0.9.5
+          echo "✅ KernelSU 集成完成"
+
+      # ========== 5. 配置内核 & 启用 BPF ==========
+      - name: 配置内核 & 启用 BPF
+        run: |
+          cd kernel
+          export ARCH=arm64
+          export SUBARCH=arm64
+
+          # 加载默认配置
+          make ${{ env.DEFCONFIG }}
+
+          # 强制启用 BPF 核心功能
+          scripts/config --enable CONFIG_BPF
+          scripts/config --enable CONFIG_BPF_SYSCALL
+          scripts/config --enable CONFIG_BPF_JIT
+          scripts/config --enable CONFIG_BPF_JIT_DEFAULT_ON
+          scripts/config --enable CONFIG_HAVE_EBPF_JIT
+          scripts/config --enable CONFIG_BPF_EVENTS
+          scripts/config --enable CONFIG_CGROUP_BPF
+          scripts/config --enable CONFIG_NET_CLS_BPF
+          scripts/config --enable CONFIG_NET_ACT_BPF
+
+          # 确保 KernelSU 所需选项已开启
+          scripts/config --enable CONFIG_KPROBES
+          scripts/config --enable CONFIG_HAVE_KPROBES
+          scripts/config --enable CONFIG_KPROBE_EVENTS
+          scripts/config --enable CONFIG_TRACEPOINTS
+          scripts/config --enable CONFIG_FTRACE
+          scripts/config --enable CONFIG_FTRACE_SYSCALLS
+          scripts/config --enable CONFIG_FUNCTION_TRACER
+          scripts/config --enable CONFIG_HAVE_DYNAMIC_FTRACE
+          scripts/config --enable CONFIG_DYNAMIC_FTRACE
+          scripts/config --enable CONFIG_DEBUG_FS
+
+          make olddefconfig
+
+          # 验证关键配置
+          echo "===== 验证 BPF & KernelSU 配置 ====="
+          grep -E "CONFIG_BPF|CONFIG_KPROBES|CONFIG_KSU" .config || true
+
+      # ========== 6. 编译内核 ==========
+      - name: 编译内核
+        run: |
+          cd kernel
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export CLANG_TRIPLE=aarch64-linux-gnu-
+          export CROSS_COMPILE=$(pwd)/../toolchain/clang/bin/aarch64-linux-gnu-
+          export CC=$(pwd)/../toolchain/clang/bin/clang
+
+          make -j$(nproc --all) \
+            ARCH=arm64 \
+            CC=clang \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            LD=ld.lld \
+            AR=llvm-ar \
+            NM=llvm-nm \
+            OBJCOPY=llvm-objcopy \
+            OBJDUMP=llvm-objdump \
+            STRIP=llvm-strip
+
+      # ========== 7. AnyKernel3 打包 ==========
+      - name: AnyKernel3 打包
+        run: |
+          # 克隆 AnyKernel3
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AnyKernel3
+
+          # 清理 AK3 默认文件
+          rm -f AnyKernel3/Image* AnyKernel3/dtb* AnyKernel3/*.zip
+
+          # 复制编译产物到 AK3 目录
+          cp kernel/arch/arm64/boot/Image.gz-dtb AnyKernel3/ 2>/dev/null || \
+          cp kernel/arch/arm64/boot/Image.gz AnyKernel3/ 2>/dev/null || \
+          cp kernel/arch/arm64/boot/Image AnyKernel3/
+
+          # 如果存在 dtbo，也复制过去
+          cp kernel/arch/arm64/boot/dtbo.img AnyKernel3/ 2>/dev/null || true
+
+          # 修改 AnyKernel3 配置（设备代号）
+          sed -i 's/do.devicecheck=1/do.devicecheck=0/g' AnyKernel3/anykernel.sh
+          sed -i 's!block=/dev/block/platform/omap/omap_hsmmc.0/by-name/boot;!block=auto;!g' AnyKernel3/anykernel.sh
+          sed -i 's/is_slot_device=0;/is_slot_device=auto;/g' AnyKernel3/anykernel.sh
+
+          # 打包成 zip
+          cd AnyKernel3
+          ZIP_NAME="OOS14_Kebab_BPF_KSU_$(date +%Y%m%d_%H%M%S).zip"
+          zip -r9 "../${ZIP_NAME}" * -x .git* README.md *placeholder*
+
+          echo "✅ 打包完成: ${ZIP_NAME}"
+          echo "ZIP_NAME=${ZIP_NAME}" >> $GITHUB_ENV
+
+      # ========== 8. 上传产物 ==========
+      - name: 上传编译产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ZIP_NAME }}
+          path: AnyKernel3/*.zip
+          retention-days: 14
+
+      - name: 上传内核配置
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-config
+          path: kernel/.config
+          retention-days: 14
